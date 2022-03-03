@@ -16,6 +16,8 @@ static void panic_and_abort(const char *title, const char *text)
     exit(1);
 }
 
+static float volume_slider_value = 1.0f;
+
 static Uint8 *wavbuf = NULL;
 static Uint32 wavlen = 0;
 static SDL_AudioSpec wavspec;
@@ -89,6 +91,13 @@ int main(int argc, char **argv)
     SDL_bool paused = SDL_TRUE;
     const SDL_Rect rewind_rect = { 100, 100, 100, 100 };
     const SDL_Rect pause_rect = { 400, 100, 100, 100 };
+    const SDL_Rect volume_rect = { (640-500) / 2, 400, 500, 20 };
+
+    SDL_Rect volume_knob;
+    volume_knob.y = volume_rect.y;
+    volume_knob.h = volume_rect.h;
+    volume_knob.w = 20;
+    volume_knob.x = (volume_rect.x + volume_rect.w) - volume_knob.w;
 
     int green = 0;
     SDL_bool keep_going = SDL_TRUE;
@@ -116,6 +125,19 @@ int main(int argc, char **argv)
                     break;
                 }
 
+                case SDL_MOUSEMOTION: {
+                    const SDL_Point pt = { e.motion.x, e.motion.y };
+                    if (SDL_PointInRect(&pt, &volume_rect) && (e.motion.state & SDL_BUTTON_LMASK)) {  // mouse is pressed inside the "volume" "slider"?
+                        const float fx = (float) (pt.x - volume_rect.x);
+                        volume_slider_value = (fx / ((float) volume_rect.w));  // a value between 0.0f and 1.0f
+                        //printf("SLIDING! At %dx%d (%d percent)\n", pt.x, pt.y, (int) SDL_round(volume_slider_value * 100.0f));
+                        volume_knob.x = pt.x - (volume_knob.w / 2);
+                        volume_knob.x = SDL_max(volume_knob.x, volume_rect.x);
+                        volume_knob.x = SDL_min(volume_knob.x, (volume_rect.x + volume_rect.w) - volume_knob.w);
+                    }
+                    break;
+                }
+
                 case SDL_DROPFILE: {
                     open_new_audio_file(e.drop.file);
                     SDL_free(e.drop.file);
@@ -130,6 +152,11 @@ int main(int argc, char **argv)
                 const int new_bytes = SDL_min(bytes_remaining, 32 * 1024);
                 static Uint8 converted_buffer[32 * 1024];
                 SDL_AudioStreamGet(stream, converted_buffer, new_bytes);  // !!! FIXME: error checking
+                const int num_samples = (new_bytes / sizeof (float));
+                float *samples = (float *) converted_buffer;
+                for (int i = 0; i < num_samples; i++) {
+                    samples[i] *= volume_slider_value;
+                }
                 SDL_QueueAudio(audio_device, converted_buffer, new_bytes);
             }
         }
@@ -141,6 +168,11 @@ int main(int argc, char **argv)
 
         SDL_RenderFillRect(renderer, &rewind_rect);
         SDL_RenderFillRect(renderer, &pause_rect);
+        SDL_RenderFillRect(renderer, &volume_rect);
+
+        SDL_SetRenderDrawColor(renderer, 0, 0, 255, 255);
+        SDL_RenderFillRect(renderer, &volume_knob);
+
         SDL_RenderPresent(renderer);
 
         green = (green + 1) % 256;
