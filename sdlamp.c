@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include "SDL.h"
 
 static SDL_AudioDeviceID audio_device = 0;
@@ -17,11 +18,28 @@ static void panic_and_abort(const char *title, const char *text)
 }
 
 static float volume_slider_value = 1.0f;
+static float balance_slider_value = 0.5f;
 
 static Uint8 *wavbuf = NULL;
 static Uint32 wavlen = 0;
 static SDL_AudioSpec wavspec;
 static SDL_AudioStream *stream = NULL;
+
+static void stop_audio(void)
+{
+    if (stream) {
+        SDL_FreeAudioStream(stream);
+    }
+
+    if (wavbuf) {
+        SDL_FreeWAV(wavbuf);
+    }
+
+    stream = NULL;
+    wavbuf = NULL;
+    wavlen = 0;
+}
+
 
 static SDL_bool open_new_audio_file(const char *fname)
 {
@@ -33,25 +51,30 @@ static SDL_bool open_new_audio_file(const char *fname)
 
     if (SDL_LoadWAV(fname, &wavspec, &wavbuf, &wavlen) == NULL) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Couldn't load wav file!", SDL_GetError(), window);
-        return SDL_FALSE;
+        goto failed;
     }
 
     stream = SDL_NewAudioStream(wavspec.format, wavspec.channels, wavspec.freq, AUDIO_F32, 2, 48000);
     if (!stream) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Couldn't create audio stream!", SDL_GetError(), window);
-        SDL_FreeWAV(wavbuf);
-        wavbuf = NULL;
-        wavlen = 0;
-        return SDL_FALSE;
+        goto failed;
     }
 
-    if (SDL_AudioStreamPut(stream, wavbuf, wavlen) == -1) {  // !!! FIXME: graceful handling.
-        panic_and_abort("Audio stream put failed", SDL_GetError());
+    if (SDL_AudioStreamPut(stream, wavbuf, wavlen) == -1) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream put failed", SDL_GetError(), window);
+        goto failed;
     }
 
-    SDL_AudioStreamFlush(stream);  // !!! FIXME: error handling
+    if (SDL_AudioStreamFlush(stream) == -1) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream flush failed", SDL_GetError(), window);
+        goto failed;
+    }
 
     return SDL_TRUE;
+
+failed:
+    stop_audio();
+    return SDL_FALSE;
 }
 
 int main(int argc, char **argv)
@@ -90,14 +113,22 @@ int main(int argc, char **argv)
 
     SDL_bool paused = SDL_TRUE;
     const SDL_Rect rewind_rect = { 100, 100, 100, 100 };
+    const SDL_Rect stop_rect = { 275, 100, 100, 100 };
     const SDL_Rect pause_rect = { 400, 100, 100, 100 };
     const SDL_Rect volume_rect = { (640-500) / 2, 400, 500, 20 };
+    const SDL_Rect balance_rect = { (640-500) / 2, 300, 500, 20 };
 
     SDL_Rect volume_knob;
     volume_knob.y = volume_rect.y;
     volume_knob.h = volume_rect.h;
     volume_knob.w = 20;
     volume_knob.x = (volume_rect.x + volume_rect.w) - volume_knob.w;
+
+    SDL_Rect balance_knob;
+    balance_knob.y = balance_rect.y;
+    balance_knob.h = balance_rect.h;
+    balance_knob.w = 20;
+    balance_knob.x = (balance_rect.x + (balance_rect.w / 2)) - balance_knob.w;
 
     int green = 0;
     SDL_bool keep_going = SDL_TRUE;
@@ -114,13 +145,18 @@ int main(int argc, char **argv)
                     if (SDL_PointInRect(&pt, &rewind_rect)) {  // pressed the "rewind" button
                         SDL_ClearQueuedAudio(audio_device);
                         SDL_AudioStreamClear(stream);
-                        if (SDL_AudioStreamPut(stream, wavbuf, wavlen) == -1) {  // !!! FIXME: graceful handling.
-                            panic_and_abort("Audio stream put failed", SDL_GetError());
+                        if (SDL_AudioStreamPut(stream, wavbuf, wavlen) == -1) {
+                            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream put failed", SDL_GetError(), window);
+                            stop_audio();
+                        } else if (SDL_AudioStreamFlush(stream) == -1) {
+                            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream flush failed", SDL_GetError(), window);
+                            stop_audio();
                         }
-                        SDL_AudioStreamFlush(stream);  // !!! FIXME: error handling
                     } else if (SDL_PointInRect(&pt, &pause_rect)) {  // pressed the "pause" button
                         paused = paused ? SDL_FALSE : SDL_TRUE;
                         SDL_PauseAudioDevice(audio_device, paused);
+                    } else if (SDL_PointInRect(&pt, &stop_rect)) {  // pressed the "stop" button
+                        stop_audio();
                     }
                     break;
                 }
@@ -134,6 +170,13 @@ int main(int argc, char **argv)
                         volume_knob.x = pt.x - (volume_knob.w / 2);
                         volume_knob.x = SDL_max(volume_knob.x, volume_rect.x);
                         volume_knob.x = SDL_min(volume_knob.x, (volume_rect.x + volume_rect.w) - volume_knob.w);
+                    } else if (SDL_PointInRect(&pt, &balance_rect) && (e.motion.state & SDL_BUTTON_LMASK)) {  // mouse is pressed inside the "balance" "slider"?
+                        const float fx = (float) (pt.x - balance_rect.x);
+                        balance_slider_value = (fx / ((float) balance_rect.w));  // a value between 0.0f and 1.0f
+                        //printf("SLIDING! At %dx%d (%d percent)\n", pt.x, pt.y, (int) SDL_round(balance_slider_value * 100.0f));
+                        balance_knob.x = pt.x - (balance_knob.w / 2);
+                        balance_knob.x = SDL_max(balance_knob.x, balance_rect.x);
+                        balance_knob.x = SDL_min(balance_knob.x, (balance_rect.x + balance_rect.w) - balance_knob.w);
                     }
                     break;
                 }
@@ -151,13 +194,29 @@ int main(int argc, char **argv)
             if (bytes_remaining > 0) {
                 const int new_bytes = SDL_min(bytes_remaining, 32 * 1024);
                 static Uint8 converted_buffer[32 * 1024];
-                SDL_AudioStreamGet(stream, converted_buffer, new_bytes);  // !!! FIXME: error checking
-                const int num_samples = (new_bytes / sizeof (float));
-                float *samples = (float *) converted_buffer;
-                for (int i = 0; i < num_samples; i++) {
-                    samples[i] *= volume_slider_value;
+                const int num_converted_bytes = SDL_AudioStreamGet(stream, converted_buffer, new_bytes);
+                if (num_converted_bytes > 0) {
+                    const int num_samples = (num_converted_bytes / sizeof (float));
+                    float *samples = (float *) converted_buffer;
+
+                    // change the volume of the audio we're playing.
+                    if (volume_slider_value != 1.0f) {
+                        for (int i = 0; i < num_samples; i++) {
+                            samples[i] *= volume_slider_value;
+                        }
+                    }
+
+                    // change the balance of the audio we're playing.
+                    if (balance_slider_value != 0.5f) {
+                        for (int i = 0; i < num_samples; i += 2) {
+                            // first sample is left, second is right.
+                            samples[i] *= 1.0f - balance_slider_value;
+                            samples[i+1] *= balance_slider_value;
+                        }
+                    }
+
+                    SDL_QueueAudio(audio_device, converted_buffer, new_bytes);
                 }
-                SDL_QueueAudio(audio_device, converted_buffer, new_bytes);
             }
         }
 
@@ -167,11 +226,14 @@ int main(int argc, char **argv)
         SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
 
         SDL_RenderFillRect(renderer, &rewind_rect);
+        SDL_RenderFillRect(renderer, &stop_rect);
         SDL_RenderFillRect(renderer, &pause_rect);
         SDL_RenderFillRect(renderer, &volume_rect);
+        SDL_RenderFillRect(renderer, &balance_rect);
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 255, 255);
         SDL_RenderFillRect(renderer, &volume_knob);
+        SDL_RenderFillRect(renderer, &balance_knob);
 
         SDL_RenderPresent(renderer);
 
