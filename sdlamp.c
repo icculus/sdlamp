@@ -199,6 +199,8 @@ int main(int argc, char **argv)
                     const int num_samples = (num_converted_bytes / sizeof (float));
                     float *samples = (float *) converted_buffer;
 
+                    SDL_assert((num_samples % 2) == 0);  // this should always be stereo data (at least for now).
+
                     // change the volume of the audio we're playing.
                     if (volume_slider_value != 1.0f) {
                         for (int i = 0; i < num_samples; i++) {
@@ -206,16 +208,19 @@ int main(int argc, char **argv)
                         }
                     }
 
+                    // first sample is left, second is right.
                     // change the balance of the audio we're playing.
-                    if (balance_slider_value != 0.5f) {
+                    if (balance_slider_value > 0.5f) {
                         for (int i = 0; i < num_samples; i += 2) {
-                            // first sample is left, second is right.
                             samples[i] *= 1.0f - balance_slider_value;
+                        }
+                    } else if (balance_slider_value < 0.5f) {
+                        for (int i = 0; i < num_samples; i += 2) {
                             samples[i+1] *= balance_slider_value;
                         }
                     }
 
-                    SDL_QueueAudio(audio_device, converted_buffer, new_bytes);
+                    SDL_QueueAudio(audio_device, converted_buffer, num_converted_bytes);
                 }
             }
         }
