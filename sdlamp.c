@@ -53,26 +53,76 @@ static Uint32 wavlen = 0;
 static SDL_AudioSpec wavspec;
 static SDL_AudioStream *stream = NULL;
 
+static void SDLCALL feed_audio_device_callback(void *userdata, Uint8 *output_stream, int len)
+{
+    SDL_AudioStream *input_stream = (SDL_AudioStream *) SDL_AtomicGetPtr((void **) &stream);
+
+    if (input_stream == NULL) {  // nothing playing, just write silence and bail.
+        SDL_memset(output_stream, '\0', len);
+        return;
+    }
+
+    const int num_converted_bytes = SDL_AudioStreamGet(input_stream, output_stream, len);
+    if (num_converted_bytes > 0) {
+        const int num_samples = (num_converted_bytes / sizeof (float));
+        float *samples = (float *) output_stream;
+
+        SDL_assert((num_samples % 2) == 0);  // this should always be stereo data (at least for now).
+
+        // change the volume of the audio we're playing.
+        if (volume_slider_value != 1.0f) {
+            for (int i = 0; i < num_samples; i++) {
+                samples[i] *= volume_slider_value;
+            }
+        }
+
+        // first sample is left, second is right.
+        // change the balance of the audio we're playing.
+        if (balance_slider_value > 0.5f) {
+            for (int i = 0; i < num_samples; i += 2) {
+                samples[i] *= 1.0f - balance_slider_value;
+            }
+        } else if (balance_slider_value < 0.5f) {
+            for (int i = 0; i < num_samples; i += 2) {
+                samples[i+1] *= balance_slider_value;
+            }
+        }
+    }
+
+    len -= num_converted_bytes;  // now has number of bytes left after feeding the device.
+    output_stream += num_converted_bytes;
+    if (len > 0) {
+        SDL_memset(output_stream, '\0', len);
+    }
+}
+
 static void stop_audio(void)
 {
+    SDL_LockAudioDevice(audio_device);
     if (stream) {
         SDL_FreeAudioStream(stream);
+        SDL_AtomicSetPtr((void **) &stream, NULL);
     }
+    SDL_UnlockAudioDevice(audio_device);
 
     if (wavbuf) {
         SDL_FreeWAV(wavbuf);
     }
 
-    stream = NULL;
     wavbuf = NULL;
     wavlen = 0;
 }
 
-
 static SDL_bool open_new_audio_file(const char *fname)
 {
-    SDL_FreeAudioStream(stream);
-    stream = NULL;
+    SDL_AudioStream *tmpstream = stream;
+
+    // make sure the audio callback can't touch `stream` while we're freeing it.
+    SDL_LockAudioDevice(audio_device);
+    SDL_AtomicSetPtr((void **) &stream, NULL);
+    SDL_UnlockAudioDevice(audio_device);
+
+    SDL_FreeAudioStream(tmpstream);
     SDL_FreeWAV(wavbuf);
     wavbuf = NULL;
     wavlen = 0;
@@ -82,21 +132,26 @@ static SDL_bool open_new_audio_file(const char *fname)
         goto failed;
     }
 
-    stream = SDL_NewAudioStream(wavspec.format, wavspec.channels, wavspec.freq, AUDIO_F32, 2, 48000);
-    if (!stream) {
+    tmpstream = SDL_NewAudioStream(wavspec.format, wavspec.channels, wavspec.freq, AUDIO_F32, 2, 48000);
+    if (!tmpstream) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Couldn't create audio stream!", SDL_GetError(), window);
         goto failed;
     }
 
-    if (SDL_AudioStreamPut(stream, wavbuf, wavlen) == -1) {
+    if (SDL_AudioStreamPut(tmpstream, wavbuf, wavlen) == -1) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream put failed", SDL_GetError(), window);
         goto failed;
     }
 
-    if (SDL_AudioStreamFlush(stream) == -1) {
+    if (SDL_AudioStreamFlush(tmpstream) == -1) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream flush failed", SDL_GetError(), window);
         goto failed;
     }
+
+    // make new `stream` available to the audio callback thread.
+    SDL_LockAudioDevice(audio_device);
+    SDL_AtomicSetPtr((void **) &stream, tmpstream);
+    SDL_UnlockAudioDevice(audio_device);
 
     return SDL_TRUE;
 
@@ -184,7 +239,7 @@ static void init_everything(int argc, char **argv)
     desired.format = AUDIO_F32;
     desired.channels = 2;
     desired.samples = 4096;
-    desired.callback = NULL;
+    desired.callback = feed_audio_device_callback;
 
     audio_device = SDL_OpenAudioDevice(NULL, 0, &desired, NULL, 0);
     if (audio_device == 0) {
@@ -227,45 +282,6 @@ static void draw_frame(SDL_Renderer *renderer, WinAmpSkin *skin)
     SDL_RenderPresent(renderer);
 }
 
-static void feed_more_audio(void)
-{
-    if (SDL_GetQueuedAudioSize(audio_device) < 8192) {
-        const int bytes_remaining = SDL_AudioStreamAvailable(stream);
-        if (bytes_remaining > 0) {
-            const int new_bytes = SDL_min(bytes_remaining, 32 * 1024);
-            static Uint8 converted_buffer[32 * 1024];
-            const int num_converted_bytes = SDL_AudioStreamGet(stream, converted_buffer, new_bytes);
-            if (num_converted_bytes > 0) {
-                const int num_samples = (num_converted_bytes / sizeof (float));
-                float *samples = (float *) converted_buffer;
-
-                SDL_assert((num_samples % 2) == 0);  // this should always be stereo data (at least for now).
-
-                // change the volume of the audio we're playing.
-                if (volume_slider_value != 1.0f) {
-                    for (int i = 0; i < num_samples; i++) {
-                        samples[i] *= volume_slider_value;
-                    }
-                }
-
-                // first sample is left, second is right.
-                // change the balance of the audio we're playing.
-                if (balance_slider_value > 0.5f) {
-                    for (int i = 0; i < num_samples; i += 2) {
-                        samples[i] *= 1.0f - balance_slider_value;
-                    }
-                } else if (balance_slider_value < 0.5f) {
-                    for (int i = 0; i < num_samples; i += 2) {
-                        samples[i+1] *= balance_slider_value;
-                    }
-                }
-
-                SDL_QueueAudio(audio_device, converted_buffer, num_converted_bytes);
-            }
-        }
-    }
-}
-
 static void deinit_everything(void)
 {
     // !!! FIXME: free_skin()
@@ -298,7 +314,6 @@ static SDL_bool handle_events(WinAmpSkin *skin)
                     if (btn->pressed) {
                         switch ((WinAmpSkinButtonId) i) {
                             case WASBTN_PREV:
-                                SDL_ClearQueuedAudio(audio_device);
                                 SDL_AudioStreamClear(stream);
                                 if (SDL_AudioStreamPut(stream, wavbuf, wavlen) == -1) {
                                     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream put failed", SDL_GetError(), window);
@@ -360,22 +375,7 @@ int main(int argc, char **argv)
 {
     init_everything(argc, argv);  // will panic_and_abort on issues.
 
-    #if 0   // !!! FIXME: do something with this.
-    SDL_Rect volume_knob;
-    volume_knob.y = volume_rect.y;
-    volume_knob.h = volume_rect.h;
-    volume_knob.w = 20;
-    volume_knob.x = (volume_rect.x + volume_rect.w) - volume_knob.w;
-
-    SDL_Rect balance_knob;
-    balance_knob.y = balance_rect.y;
-    balance_knob.h = balance_rect.h;
-    balance_knob.w = 20;
-    balance_knob.x = (balance_rect.x + (balance_rect.w / 2)) - balance_knob.w;
-    #endif
-
     while (handle_events(&skin)) {
-        feed_more_audio();
         draw_frame(renderer, &skin);
     }
 
