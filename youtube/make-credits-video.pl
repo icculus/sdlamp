@@ -87,7 +87,7 @@ my $x_ppem; my $y_ppem; my $ascender; my $descender; my $width; my $textheightgi
 ($x_ppem, $y_ppem, $ascender, $descender, $width, $textheightbig, $max_advance) = $img->QueryFontMetrics(font => $bigfont, pointsize => $bigpointsize, text => 'W',);
 ($x_ppem, $y_ppem, $ascender, $descender, $width, $textheightsmall, $max_advance) = $img->QueryFontMetrics(font => $smallfont, pointsize => $smallpointsize, text => 'W');
 
-my $y = $textheightbig;
+my $y = int($textheightbig * 0.75);
 $img->Annotate(font => $bigfont, pointsize => $bigpointsize, x => 0, y => $y, gravity => 'North', fill => 'white', text => "Thanks to my patrons!", antialias => 'true');
 #$y += $textheightbig * 1.5;
 
@@ -95,7 +95,7 @@ $img->Annotate(font => $bigfont, pointsize => $bigpointsize, x => 0, y => $y, gr
 my $creditsheight = ($num_credits / 2) * ($textheightsmall * 1.1);
 #my $credits_y_start = $y;
 my $credits_x_start = $imgw / 8;
-my $credits_y_start = (($imgh - $creditsheight) / 2) + $textheightsmall;
+my $credits_y_start = int((($imgh - $creditsheight) / 2.5) + $textheightsmall);
 my $credits_x_advance = $imgw / 2;
 my $credits_y_advance = $textheightsmall * 1.1;
 
