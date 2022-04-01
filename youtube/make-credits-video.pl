@@ -38,9 +38,24 @@ usage() if not defined $title;
 
 # Randomize the list so it's in a different order for each video!
 open(FH, '<', $patronstxtfname) or die("Failed to open $patronstxtfname: $!\n");
-my @credits = <FH>;
+my @creditstxt = <FH>;
 close(FH);
+
+my @credits = ();
+foreach (@creditstxt) {
+    chomp;
+    s/\A\s+//;
+    s/\s+\Z//;
+    push @credits, $_ if ($_ ne '');
+}
+undef @creditstxt;
+
 fisher_yates_shuffle( \@credits );
+
+# if the credit list has one entry that would be on a row by itself, add an extra string.
+if ((scalar(@credits) % 2) != 0) {
+    push @credits, '(your name here!)';
+}
 
 my $giantfont = 'Ubuntu-Bold';
 my $bigfont = 'Ubuntu-Bold';
@@ -89,10 +104,6 @@ $y = $credits_y_start;
 
 my $idx = 0;
 foreach (@credits) {
-    chomp;
-    s/\A\s+//;
-    s/\s+\Z//;
-    next if ($_ eq '');
     $img->Annotate(font => $smallfont, pointsize => $smallpointsize, x => $x, y => $y, gravity => 'NorthWest', fill => 'white', antialias => 'true', text => $_);
     if ($idx & 1) {
         $x = $credits_x_start;
