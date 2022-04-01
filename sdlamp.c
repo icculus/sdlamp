@@ -23,9 +23,28 @@ typedef enum
 
 typedef struct
 {
+    SDL_Texture *texture;
+    WinAmpSkinButton knob;
+    int num_frames;
+    int frame_width;
+    int frame_height;
+    SDL_Rect dstrect;
+    float value;
+} WinAmpSkinSlider;
+
+typedef enum
+{
+    WASSLD_VOLUME=0,
+    WASSLD_TOTAL
+} WinAmpSkinSliderId;
+
+typedef struct
+{
     SDL_Texture *tex_main;
     SDL_Texture *tex_cbuttons;
+    SDL_Texture *tex_volume;
     WinAmpSkinButton buttons[WASBTN_TOTAL];
+    WinAmpSkinSlider sliders[WASSLD_TOTAL];
 } WinAmpSkin;
 
 static SDL_AudioDeviceID audio_device = 0;
@@ -45,7 +64,6 @@ static void panic_and_abort(const char *title, const char *text)
 }
 
 static WinAmpSkin skin;
-static float volume_slider_value = 1.0f;
 static float balance_slider_value = 0.5f;
 
 static Uint8 *wavbuf = NULL;
@@ -64,15 +82,16 @@ static void SDLCALL feed_audio_device_callback(void *userdata, Uint8 *output_str
 
     const int num_converted_bytes = SDL_AudioStreamGet(input_stream, output_stream, len);
     if (num_converted_bytes > 0) {
+        const float volume = skin.sliders[WASSLD_VOLUME].value;
         const int num_samples = (num_converted_bytes / sizeof (float));
         float *samples = (float *) output_stream;
 
         SDL_assert((num_samples % 2) == 0);  // this should always be stereo data (at least for now).
 
         // change the volume of the audio we're playing.
-        if (volume_slider_value != 1.0f) {
+        if (volume != 1.0f) {
             for (int i = 0; i < num_samples; i++) {
-                samples[i] *= volume_slider_value;
+                samples[i] *= volume;
             }
         }
 
@@ -195,12 +214,34 @@ static SDL_INLINE void init_skin_button(WinAmpSkinButton *btn, SDL_Texture *tex,
     btn->pressed = SDL_FALSE;
 }
 
+static SDL_INLINE void init_skin_slider(WinAmpSkinSlider *slider, SDL_Texture *tex,
+                                        const int w, const int h,
+                                        const int dx, const int dy,
+                                        const int knobw, const int knobh,
+                                        const int sxu, const int syu,
+                                        const int sxp, const int syp,
+                                        const int num_frames, const int frame_width,
+                                        const int frame_height, const float initial_value)
+{
+    init_skin_button(&slider->knob, tex, knobw, knobh, dx, dy, sxu, syu, sxp, syp);
+    slider->texture = tex;
+    slider->num_frames = num_frames;
+    slider->frame_width = frame_width;
+    slider->frame_height = frame_height;
+    slider->dstrect.x = dx;
+    slider->dstrect.y = dy;
+    slider->dstrect.w = w;
+    slider->dstrect.h = h;
+    slider->value = initial_value;
+}
+
 static SDL_bool load_skin(WinAmpSkin *skin, const char *fname)  // !!! FIXME: use this variable
 {
     SDL_zerop(skin);
 
     skin->tex_main = load_texture("hifi/Main.bmp");  // !!! FIXME: hardcoded
     skin->tex_cbuttons = load_texture("hifi/Cbuttons.bmp"); // !!! FIXME: hardcoded
+    skin->tex_volume = load_texture("hifi/Volume.bmp"); // !!! FIXME: hardcoded
 
     init_skin_button(&skin->buttons[WASBTN_PREV], skin->tex_cbuttons, 23, 18, 16, 88, 0, 0, 0, 18);
     init_skin_button(&skin->buttons[WASBTN_PLAY], skin->tex_cbuttons, 23, 18, 39, 88, 23, 0, 23, 18);
@@ -208,6 +249,8 @@ static SDL_bool load_skin(WinAmpSkin *skin, const char *fname)  // !!! FIXME: us
     init_skin_button(&skin->buttons[WASBTN_STOP], skin->tex_cbuttons, 23, 18, 85, 88, 69, 0, 69, 18);
     init_skin_button(&skin->buttons[WASBTN_NEXT], skin->tex_cbuttons, 22, 18, 108, 88, 92, 0, 92, 18);
     init_skin_button(&skin->buttons[WASBTN_EJECT], skin->tex_cbuttons, 22, 16, 136, 89, 114, 0, 114, 16);
+
+    init_skin_slider(&skin->sliders[WASSLD_VOLUME], skin->tex_volume, 68, 13, 107, 57, 14, 11, 15, 422, 0, 422, 28, 68, 15, 1.0f);
 
     return SDL_TRUE;
 }
@@ -266,6 +309,25 @@ static void draw_button(SDL_Renderer *renderer, WinAmpSkinButton *btn)
     }
 }
 
+static void draw_slider(SDL_Renderer *renderer, WinAmpSkinSlider *slider)
+{
+    SDL_assert(slider->value >= 0.0f);
+    SDL_assert(slider->value <= 1.0f);
+
+    if (slider->texture == NULL) {
+        const int color = (int) (255.0f * slider->value);
+        SDL_SetRenderDrawColor(renderer, color, color, color, 255);
+        SDL_RenderFillRect(renderer, &slider->dstrect);
+    } else {
+        int frameidx = (int) (((float) slider->num_frames) * slider->value);
+        frameidx = SDL_clamp(frameidx, 0, slider->num_frames - 1);
+        const int srcy = slider->frame_height * frameidx;
+        const SDL_Rect srcrect = { 0, srcy, slider->dstrect.w, slider->dstrect.h };
+        SDL_RenderCopy(renderer, slider->texture, &srcrect, &slider->dstrect);
+    }
+    draw_button(renderer, &slider->knob);
+}
+
 static void draw_frame(SDL_Renderer *renderer, WinAmpSkin *skin)
 {
     int i;
@@ -277,6 +339,10 @@ static void draw_frame(SDL_Renderer *renderer, WinAmpSkin *skin)
 
     for (i = 0; i < SDL_arraysize(skin->buttons); i++) {
         draw_button(renderer, &skin->buttons[i]);
+    }
+
+    for (i = 0; i < SDL_arraysize(skin->sliders); i++) {
+        draw_slider(renderer, &skin->sliders[i]);
     }
 
     SDL_RenderPresent(renderer);
@@ -293,6 +359,22 @@ static void deinit_everything(void)
 }
 
 static SDL_bool paused = SDL_TRUE;  // !!! FIXME: move this later.
+
+static void handle_slider_mouse(WinAmpSkinSlider *slider, const SDL_bool pressed, const SDL_Point *pt)
+{
+    slider->knob.pressed = (pressed && SDL_PointInRect(pt, &slider->dstrect)) ? SDL_TRUE : SDL_FALSE;
+    if (slider->knob.pressed) {
+        const int new_knob_x = pt->x - (slider->knob.dstrect.w / 2);
+        const int xnear = slider->dstrect.x;
+        const int xfar = (slider->dstrect.x + slider->dstrect.w) - slider->knob.dstrect.w;
+        slider->knob.dstrect.x = SDL_clamp(new_knob_x, xnear, xfar);
+
+        // make sure the mixer thread isn't running when this value changes.
+        SDL_LockAudioDevice(audio_device);
+        slider->value = ((float) (pt->x - slider->dstrect.x)) / ((float) slider->dstrect.w);  // between 0.0f and 1.0f
+        SDL_UnlockAudioDevice(audio_device);
+    }
+}
 
 static SDL_bool handle_events(WinAmpSkin *skin)
 {
@@ -332,33 +414,29 @@ static SDL_bool handle_events(WinAmpSkin *skin)
                             case WASBTN_STOP:
                                 stop_audio();
                                 break;
+
+                            default: break;  // !!! FIXME: handle more buttons here.
                         }
                     }
                 }
+
+                for (i = 0; i < SDL_arraysize(skin->sliders); i++) {
+                    handle_slider_mouse(&skin->sliders[i], pressed, &pt);
+                }
+
                 break;
             }
 
-            #if 0
             case SDL_MOUSEMOTION: {
                 const SDL_Point pt = { e.motion.x, e.motion.y };
-                if (SDL_PointInRect(&pt, &volume_rect) && (e.motion.state & SDL_BUTTON_LMASK)) {  // mouse is pressed inside the "volume" "slider"?
-                    const float fx = (float) (pt.x - volume_rect.x);
-                    volume_slider_value = (fx / ((float) volume_rect.w));  // a value between 0.0f and 1.0f
-                    //printf("SLIDING! At %dx%d (%d percent)\n", pt.x, pt.y, (int) SDL_round(volume_slider_value * 100.0f));
-                    volume_knob.x = pt.x - (volume_knob.w / 2);
-                    volume_knob.x = SDL_max(volume_knob.x, volume_rect.x);
-                    volume_knob.x = SDL_min(volume_knob.x, (volume_rect.x + volume_rect.w) - volume_knob.w);
-                } else if (SDL_PointInRect(&pt, &balance_rect) && (e.motion.state & SDL_BUTTON_LMASK)) {  // mouse is pressed inside the "balance" "slider"?
-                    const float fx = (float) (pt.x - balance_rect.x);
-                    balance_slider_value = (fx / ((float) balance_rect.w));  // a value between 0.0f and 1.0f
-                    //printf("SLIDING! At %dx%d (%d percent)\n", pt.x, pt.y, (int) SDL_round(balance_slider_value * 100.0f));
-                    balance_knob.x = pt.x - (balance_knob.w / 2);
-                    balance_knob.x = SDL_max(balance_knob.x, balance_rect.x);
-                    balance_knob.x = SDL_min(balance_knob.x, (balance_rect.x + balance_rect.w) - balance_knob.w);
+                const SDL_bool pressed = (e.motion.state & SDL_BUTTON_LMASK) ? SDL_TRUE : SDL_FALSE;
+                int i;
+
+                for (i = 0; i < SDL_arraysize(skin->sliders); i++) {
+                    handle_slider_mouse(&skin->sliders[i], pressed, &pt);
                 }
                 break;
             }
-            #endif
 
             case SDL_DROPFILE: {
                 open_new_audio_file(e.drop.file);
