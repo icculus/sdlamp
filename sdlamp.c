@@ -1,5 +1,9 @@
 #include <stdio.h>
 #include "SDL.h"
+#include "SDL_sound.h"
+#include "physfs.h"
+#include "physfs/extras/physfsrwops.h"
+#include "physfs/extras/ignorecase.h"
 
 typedef void (*ClickFn)(void);
 
@@ -54,9 +58,15 @@ typedef struct
     WinAmpSkinButton *pressed;
 } WinAmpSkin;
 
+static WinAmpSkin skin;
 static SDL_AudioDeviceID audio_device = 0;
+static Sound_AudioInfo audio_device_spec;
+static Sound_Sample *current_sample = NULL;
+static Uint32 sample_available = 0;
+static Uint32 sample_position = 0;
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
+
 
 #if defined(__GNUC__) || defined(__clang__)
 static void panic_and_abort(const char *title, const char *text) __attribute__((noreturn));
@@ -70,119 +80,60 @@ static void panic_and_abort(const char *title, const char *text)
     exit(1);
 }
 
-
-typedef struct ZipEntry
+static const char *physfs_errstr(void)
 {
-    char *fname;
-    Uint32 compression_type;
-    Uint32 compressed_size;
-    Uint32 uncompressed_size;
-    Uint32 filepos;
-} ZipEntry;
-
-typedef struct ZipArchive
-{
-    SDL_RWops *rw;
-    Uint32 num_entries;
-    ZipEntry *entries;
-} ZipArchive;
-
-static void unload_zip_archive(ZipArchive *zip)
-{
-    if (zip) {
-        if (zip->rw) { SDL_RWclose(zip->rw); }
-        SDL_free(zip->entries);
-        SDL_free(zip);
-    }
+    return PHYSFS_getErrorByCode(PHYSFS_getLastErrorCode());
 }
 
-static ZipArchive *load_zip_archive(const char *fname)
+static SDL_RWops *openrw(const char *_fname)
 {
-    SDL_RWops *rw = SDL_RWFromFile(fname, "rb");
-    if (!rw) {
+    char *fname = SDL_strdup(_fname);
+    if (!fname) {
+        SDL_OutOfMemory();
         return NULL;
     }
 
-    ZipArchive *retval = (ZipArchive *) SDL_calloc(1, sizeof (ZipArchive));
-    if (retval == NULL) {
-        SDL_RWclose(rw);
-        return NULL;
-    }
-
-    retval->rw = rw;
-
-    Uint32 ui32;
-    Uint16 ui16;
-
-    while ( SDL_RWread(rw, &ui32, sizeof (ui32), 1) == 1 ) {
-        ZipEntry entry;
-        Uint16 fnamelen;
-        Uint16 extralen;
-        SDL_zero(entry);
-
-        ui32 = SDL_SwapLE32(ui32);
-        if (ui32 != 0x04034b50) {   // magic number for local file header.
-            break;
-        }
-
-        SDL_RWread(rw, &ui16, sizeof (ui16), 1);  // version needed to extract
-        SDL_RWread(rw, &ui16, sizeof (ui16), 1);  // general purpose bit flag
-        SDL_RWread(rw, &ui16, sizeof (ui16), 1);  // compression method
-        entry.compression_type = SDL_SwapLE16(ui16);
-        SDL_RWread(rw, &ui16, sizeof (ui16), 1);  // last mod file time
-        SDL_RWread(rw, &ui16, sizeof (ui16), 1);  // last mod file date
-        SDL_RWread(rw, &ui32, sizeof (ui32), 1);  // crc-32
-        SDL_RWread(rw, &ui32, sizeof (ui32), 1);  // compressed size
-        entry.compressed_size = SDL_SwapLE32(ui32);
-        SDL_RWread(rw, &ui32, sizeof (ui32), 1);  // uncompressed size
-        entry.uncompressed_size = SDL_SwapLE32(ui32);
-        SDL_RWread(rw, &ui16, sizeof (ui16), 1);  // file name length
-        fnamelen = SDL_SwapLE16(ui16);
-        SDL_RWread(rw, &ui16, sizeof (ui16), 1);  // extra field length
-        extralen = SDL_SwapLE16(ui16);
-
-        entry.fname = (char *) SDL_malloc(fnamelen + 1);
-        SDL_RWread(rw, entry.fname, fnamelen, 1);
-        entry.fname[fnamelen] = '\0';
-        SDL_RWseek(rw, extralen, RW_SEEK_CUR);
-
-        entry.filepos = SDL_RWtell(rw);
-
-        SDL_RWseek(rw, entry.compressed_size, RW_SEEK_CUR);  /* ready for next local file header */
-
-        void *ptr = SDL_realloc(retval->entries, sizeof (ZipEntry) * (retval->num_entries + 1));
-        retval->entries = ptr;
-        SDL_memcpy(&retval->entries[retval->num_entries], &entry, sizeof (ZipEntry));
-        retval->num_entries++;
-    }
-
+    PHYSFSEXT_locateCorrectCase(fname);
+    SDL_RWops *retval = PHYSFSRWOPS_openRead(fname);
+    SDL_free(fname);
     return retval;
 }
 
-
-static WinAmpSkin skin;
-
-static Uint8 *wavbuf = NULL;
-static Uint32 wavlen = 0;
-static SDL_AudioSpec wavspec;
-static SDL_AudioStream *stream = NULL;
-
 static void SDLCALL feed_audio_device_callback(void *userdata, Uint8 *output_stream, int len)
 {
-    SDL_AudioStream *input_stream = (SDL_AudioStream *) SDL_AtomicGetPtr((void **) &stream);
+    Sound_Sample *sample = (Sound_Sample *) SDL_AtomicGetPtr((void **) &current_sample);
 
-    if (input_stream == NULL) {  // nothing playing, just write silence and bail.
+    if (sample == NULL) {  // nothing playing, just write silence and bail.
         SDL_memset(output_stream, '\0', len);
         return;
     }
 
-    const int num_converted_bytes = SDL_AudioStreamGet(input_stream, output_stream, len);
-    if (num_converted_bytes > 0) {
-        const float volume = skin.sliders[WASSLD_VOLUME].value;
-        const float balance = skin.sliders[WASSLD_BALANCE].value;
-        const int num_samples = (num_converted_bytes / sizeof (float));
-        float *samples = (float *) output_stream;
+    const float volume = skin.sliders[WASSLD_VOLUME].value;
+    const float balance = skin.sliders[WASSLD_BALANCE].value;
 
+    while (len > 0) {
+        if (sample_available == 0) {
+            const Uint32 br = Sound_Decode(sample);
+            if (br == 0) {
+                // !!! FIXME: rework stop_audio and use it here.
+                Sound_FreeSample(current_sample);
+                SDL_AtomicSetPtr((void **) &current_sample, NULL);
+                sample_available = 0;
+                sample_position = 0;
+                SDL_memset(output_stream, '\0', len);  // write silence and bail.
+                return;
+            }
+
+            sample_available = br;
+            sample_position = 0;
+        }
+
+        float *samples = (float *) output_stream;
+        const Uint32 cpy = SDL_min(sample_available, (Uint32) len);
+        SDL_assert(cpy > 0);
+        SDL_memcpy(samples, ((const Uint8 *) sample->buffer) + sample_position, (size_t) cpy);
+
+        const int num_samples = (int) (cpy / sizeof (float));
         SDL_assert((num_samples % 2) == 0);  // this should always be stereo data (at least for now).
 
         // change the volume of the audio we're playing.
@@ -203,90 +154,63 @@ static void SDLCALL feed_audio_device_callback(void *userdata, Uint8 *output_str
                 samples[i+1] *= balance;
             }
         }
-    }
 
-    len -= num_converted_bytes;  // now has number of bytes left after feeding the device.
-    output_stream += num_converted_bytes;
-    if (len > 0) {
-        SDL_memset(output_stream, '\0', len);
+        len -= cpy;
+        output_stream += cpy;
+        sample_available -= cpy;
+        sample_position += cpy;
     }
 }
 
 static void stop_audio(void)
 {
-    SDL_LockAudioDevice(audio_device);
-    if (stream) {
-        SDL_FreeAudioStream(stream);
-        SDL_AtomicSetPtr((void **) &stream, NULL);
-    }
-    SDL_UnlockAudioDevice(audio_device);
-
-    if (wavbuf) {
-        SDL_FreeWAV(wavbuf);
+    Sound_Sample *sample = current_sample;
+    // make sure the audio callback can't touch `sample` while we're freeing it.
+    if (sample) {
+        SDL_LockAudioDevice(audio_device);
+        SDL_AtomicSetPtr((void **) &current_sample, NULL);
+        SDL_UnlockAudioDevice(audio_device);
+        Sound_FreeSample(sample);
     }
 
-    wavbuf = NULL;
-    wavlen = 0;
+    sample_available = 0;
+    sample_position = 0;
 }
 
 static SDL_bool open_new_audio_file(const char *fname)
 {
-    SDL_AudioStream *tmpstream = stream;
+    stop_audio();
 
-    // make sure the audio callback can't touch `stream` while we're freeing it.
+    SDL_assert(current_sample == NULL);  // stop_audio should have set this to NULL.
+
+    Sound_Sample *sample = Sound_NewSampleFromFile(fname, &audio_device_spec, 64 * 1024);
+    if (!sample) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Couldn't load audio file!", Sound_GetError(), window);
+        return SDL_FALSE;
+    }
+
+    // make new `sample` available to the audio callback thread.
     SDL_LockAudioDevice(audio_device);
-    SDL_AtomicSetPtr((void **) &stream, NULL);
-    SDL_UnlockAudioDevice(audio_device);
-
-    SDL_FreeAudioStream(tmpstream);
-    SDL_FreeWAV(wavbuf);
-    wavbuf = NULL;
-    wavlen = 0;
-
-    if (SDL_LoadWAV(fname, &wavspec, &wavbuf, &wavlen) == NULL) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Couldn't load wav file!", SDL_GetError(), window);
-        goto failed;
-    }
-
-    tmpstream = SDL_NewAudioStream(wavspec.format, wavspec.channels, wavspec.freq, AUDIO_F32, 2, 48000);
-    if (!tmpstream) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Couldn't create audio stream!", SDL_GetError(), window);
-        goto failed;
-    }
-
-    if (SDL_AudioStreamPut(tmpstream, wavbuf, wavlen) == -1) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream put failed", SDL_GetError(), window);
-        goto failed;
-    }
-
-    if (SDL_AudioStreamFlush(tmpstream) == -1) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream flush failed", SDL_GetError(), window);
-        goto failed;
-    }
-
-    // make new `stream` available to the audio callback thread.
-    SDL_LockAudioDevice(audio_device);
-    SDL_AtomicSetPtr((void **) &stream, tmpstream);
+    SDL_AtomicSetPtr((void **) &current_sample, sample);
     SDL_UnlockAudioDevice(audio_device);
 
     return SDL_TRUE;
-
-failed:
-    stop_audio();
-    return SDL_FALSE;
 }
 
 // !!! FIXME: maybe a better name.
 
 static void previous_clicked(void)
 {
-    SDL_AudioStreamClear(stream);
-    if (SDL_AudioStreamPut(stream, wavbuf, wavlen) == -1) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream put failed", SDL_GetError(), window);
-        stop_audio();
-    } else if (SDL_AudioStreamFlush(stream) == -1) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio stream flush failed", SDL_GetError(), window);
-        stop_audio();
+    int rc = 1;
+    SDL_LockAudioDevice(audio_device);
+    if (current_sample) {
+        rc = Sound_Rewind(current_sample);
+    }
+    sample_available = 0;
+    sample_position = 0;
+    SDL_UnlockAudioDevice(audio_device);
+    if (!rc) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Couldn't rewind audio file!", Sound_GetError(), window);
     }
 }
 
@@ -373,32 +297,7 @@ static SDL_INLINE void init_skin_slider(WinAmpSkinSlider *slider, SDL_Texture *t
     slider->knob.dstrect.x = SDL_clamp(knobx, dx, ((dx + w) - knobw));
 }
 
-static SDL_RWops *openrw(ZipArchive *zip, const char *dirname, const char *fname)
-{
-    if (zip) {
-        for (Uint32 i = 0; i < zip->num_entries; i++) {
-            const ZipEntry *entry = &zip->entries[i];
-            if (SDL_strcasecmp(entry->fname, fname) == 0) {
-                SDL_RWseek(zip->rw, entry->filepos, RW_SEEK_SET);
-                void *data = SDL_malloc(entry->compressed_size);
-                SDL_RWread(zip->rw, data, entry->compressed_size, 1);
-                SDL_assert(entry->compression_type == 0);  // if (entry->compression_type != 0) { push data through zlib };
-                return SDL_RWFromConstMem(data, entry->uncompressed_size);
-            }
-        }
-        return NULL;
-    }
-
-    // we don't have a zip file, read from disk
-    const size_t fullpathlen = SDL_strlen(dirname) + SDL_strlen(fname) + 2;
-    char *fullpath = (char *) SDL_malloc(fullpathlen);
-    SDL_snprintf(fullpath, fullpathlen, "%s/%s", dirname, fname);  // !!! FIXME: filename case is a problem on Unix.
-    SDL_RWops *retval = SDL_RWFromFile(fullpath, "rb");
-    SDL_free(fullpath);
-    return retval;
-}
-
-static void load_skin(WinAmpSkin *skin, const char *fname)
+static void free_skin(WinAmpSkin *skin)
 {
     if (skin->tex_main) { SDL_DestroyTexture(skin->tex_main); }
     if (skin->tex_cbuttons) { SDL_DestroyTexture(skin->tex_cbuttons); };
@@ -406,15 +305,22 @@ static void load_skin(WinAmpSkin *skin, const char *fname)
     if (skin->tex_balance) { SDL_DestroyTexture(skin->tex_balance); };
 
     SDL_zerop(skin);
+}
 
-    ZipArchive *zip = load_zip_archive(fname);
+static void load_skin(WinAmpSkin *skin, const char *fname)
+{
+    free_skin(skin);
 
-    skin->tex_main = load_texture(openrw(zip, fname, "main.bmp"));
-    skin->tex_cbuttons = load_texture(openrw(zip, fname, "cbuttons.bmp"));
-    skin->tex_volume = load_texture(openrw(zip, fname, "volume.bmp"));
-    skin->tex_balance = load_texture(openrw(zip, fname, "balance.bmp"));
+    if (!PHYSFS_mount(fname, NULL, 1)) {
+        return;
+    }
 
-    unload_zip_archive(zip);
+    skin->tex_main = load_texture(openrw("main.bmp"));
+    skin->tex_cbuttons = load_texture(openrw("cbuttons.bmp"));
+    skin->tex_volume = load_texture(openrw("volume.bmp"));
+    skin->tex_balance = load_texture(openrw("balance.bmp"));
+
+    PHYSFS_unmount(fname);
 
     init_skin_button(&skin->buttons[WASBTN_PREV], skin->tex_cbuttons, previous_clicked, 23, 18, 16, 88, 0, 0, 0, 18);
     init_skin_button(&skin->buttons[WASBTN_PLAY], skin->tex_cbuttons, NULL, 23, 18, 39, 88, 23, 0, 23, 18);
@@ -435,7 +341,15 @@ static void init_everything(int argc, char **argv)
         panic_and_abort("SDL_Init failed", SDL_GetError());
     }
 
-    window = SDL_CreateWindow("Hello SDL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 275, 116, 0);
+    if (!PHYSFS_init(argv[0])) {
+        panic_and_abort("PHYSFS_init failed", physfs_errstr());
+    }
+
+    if (!Sound_Init()) {
+        panic_and_abort("Sound_Init failed", Sound_GetError());
+    }
+
+    window = SDL_CreateWindow("Hello SDL", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 275, 116, SDL_WINDOW_HIDDEN);
     if (!window) {
         panic_and_abort("SDL_CreateWindow failed", SDL_GetError());
     }
@@ -444,6 +358,8 @@ static void init_everything(int argc, char **argv)
     if (!renderer) {
         panic_and_abort("SDL_CreateRenderer failed", SDL_GetError());
     }
+
+    SDL_ShowWindow(window);
 
     load_skin(&skin, "classic.wsz");
 
@@ -458,6 +374,11 @@ static void init_everything(int argc, char **argv)
     if (audio_device == 0) {
         panic_and_abort("Couldn't audio device!", SDL_GetError());
     }
+
+    SDL_zero(audio_device_spec);
+    audio_device_spec.format = desired.format;
+    audio_device_spec.channels = desired.channels;
+    audio_device_spec.rate = desired.freq;
 
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);  // tell SDL we want this event that is disabled by default.
 
@@ -520,11 +441,17 @@ static void draw_frame(SDL_Renderer *renderer, WinAmpSkin *skin)
 
 static void deinit_everything(void)
 {
-    // !!! FIXME: free_skin()
-    SDL_FreeWAV(wavbuf);
     SDL_CloseAudioDevice(audio_device);
+    if (current_sample) {
+        Sound_FreeSample(current_sample);
+        current_sample = NULL;
+    }
+
+    free_skin(&skin);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
+    PHYSFS_deinit();
+    Sound_Quit();
     SDL_Quit();
 }
 

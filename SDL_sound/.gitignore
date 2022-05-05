@@ -1,0 +1,37 @@
+SDL2_sound.pc
+
+*.so
+*.so.*
+*.dll
+*.exe
+*.o
+*.obj
+*.lib
+*.a
+*.lnk
+*.err
+*.map
+
+# for CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+cmake_uninstall.cmake
+install_manifest.txt
+Makefile
+.ninja_*
+*.ninja
+
+# for Visual C++
+.vs
+Debug
+MinSizeRel
+Release
+RelWithDebInfo
+*.sln
+*.vcxproj
+*.filters
+*.user
+
+playsound
+playsound_simple
