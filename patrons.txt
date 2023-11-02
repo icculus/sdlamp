@@ -1,34 +1,31 @@
-Arthur Brainville (Ybalrid)
-Rebecca Heineman
-FrogJB
-Eivind "flesk" K. Nilsbakken 
-Johannes H
-Ignaz Forster
-Torsten Giebl
-DaVince
-Alex M.
-WizzardMaker
-RAWRLAB Games
-aris
+Dimitri Belopopsky
+Evan Burkey
+playmer
 TTimo
-Harm Geerts
-Aidy Capp
-Matthew Morley
-Dominik Reichardt
-Stephane Peter
-Kim Olsen
-Cheeseness
-Vitorio Miliano
-Corwin Hansen
-Flameeyes
-Steffen Hein
-NuclearMonster
-Ryan Kornheisl
+Robert Kooima (rlk)
 Andrew Williams
-David Gow
-Michael Watzko
-Joshua T. Fisher
-Max Waine
-alinuxfan
+AidyC
+Johannes H
+Dominus Dragon
+RAWRLAB Games
+Jason Woodward
+Vitorio Miliano
+Alex Malinovich
+Jared Breland
+Rohit Nirmal
+Merlyn Morgan-Graham
+Flameeyes
+Kim Olsen
 Matthew Morley
-
+bruxisma
+Michael Watzko
+Rémi Verschelde
+keen456
+David Gow
+Cheeseness
+alinuxfan
+Michael Nischt
+Christian Kündig
+Corwin Hansen
+MrNuclearMonster
+Seth Anderson
